@@ -1,0 +1,220 @@
+---
+title: "Final Project"
+author: "Tianjian Xie"
+date: "2023-04-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(raster)
+library(foreign)
+library(sf)
+library(tidyverse)
+library(glmnet)
+library(ggplot2)
+library(tree)
+library(rpart.plot)
+library(neuralnet)
+# library(rgdal)
+```
+
+## Data Input
+```{r include=FALSE}
+COL_Pop <- read.csv("Population_Colorado.csv")
+Pop_GDP <- read.csv("pop_gdp.csv")
+pa01dstx <- read.dbf("pa01dstx.dbf")
+pa01dstxshp <- read_sf(dsn="pa01dstx.shp")
+solarmap <- read.csv("solar.csv")
+windmaprgb <- brick("wtk_conus_100m_mean_masked.tif")
+elecprice <- read.csv("Average_retail_price_of_electricity_annual.csv")
+powerconsumption <- read.csv("powerconsumption.csv")
+EXC <- read.csv("EXC.csv")
+spg <- read.csv("spg.csv")
+```
+
+## Data Cleaning
+```{r}
+COL_Pop_Year   <- COL_Pop %>% group_by(year) %>% summarise(across(totalPopulation,sum))
+options(dplyr.summarise.inform = FALSE)
+COL_Pop_County <- COL_Pop %>% group_by(county, year) %>% dplyr::summarise(across(totalPopulation,sum))
+
+write.csv(COL_Pop_County,"Population_County_Colorado.csv")
+write.csv(COL_Pop_Year,"Population_Year_Colorado.csv")
+
+solarmap <-  filter(solarmap, latitude>=37 & latitude <= 41 & longitude <=-102.0248 & 
+               longitude >= -109.0248)
+
+# my_spdf <- readOGR( 
+#   dsn= paste0("pa01dstx.shp") , 
+#   layer="TM_WORLD_BORDERS_SIMPL-0.3",
+#   verbose=FALSE
+# )
+```
+
+## EDA
+```{r}
+# Populationprediction <- lm(totalPopulation~year, data = COL_Pop_Year)
+# totalPopultaion <- COL_Pop_Year$totalPopulation
+# changerate <- list()
+# n <- 1
+# for(i in 2:nrow(COL_Pop_Year)) {
+#   changerate[n] <- (totalPopultaion[i]-totalPopultaion[(i-1)])/totalPopultaion[(i-1)]
+#   n <- n+1
+#   i <- i+1
+# }
+# changerate <- append(0,changerate)
+# COL_Pop_Year$changeRate <- changerate
+
+totalPopultaion <- Pop_GDP$totalPopulation
+PopChangerate <- list()
+n <- 1
+for(i in 2:nrow(Pop_GDP)) {
+  PopChangerate[n] <- (totalPopultaion[i]-totalPopultaion[(i-1)])/totalPopultaion[(i-1)]
+  n <- n+1
+  i <- i+1
+}
+PopChangerate <- append(0,PopChangerate)
+Pop_GDP$PopChangeRate <- as.numeric(as.character(PopChangerate))
+
+GDP <- Pop_GDP$GDP
+GDPChangerate <- list()
+m <- 1
+for(i in 2:nrow(Pop_GDP)) {
+  GDPChangerate[m] <- (GDP[i]-GDP[(i-1)])/GDP[(i-1)]
+  m <- m+1
+  i <- i+1
+}
+GDPChangerate <- append(0,GDPChangerate)
+Pop_GDP$GDPChangeRate <- as.numeric(as.character(GDPChangerate))
+
+Pop_GDP <- Pop_GDP[c(5:26),-1]
+elecprice <- as.vector(t(elecprice))
+elecprice <- as.numeric(elecprice[26:5])
+Pop_GDP$ElecPrice <- elecprice
+ElecPriceChangerate <- list()
+n <- 1
+for(i in 2:nrow(Pop_GDP)) {
+  ElecPriceChangerate[n] <- (elecprice[i]-elecprice[(i-1)])/elecprice[(i-1)]
+  n <- n+1
+  i <- i+1
+}
+ElecPriceChangerate <- append(0,ElecPriceChangerate)
+Pop_GDP$ElecPriceChangeRate <- as.numeric(as.character(ElecPriceChangerate))
+rownames(Pop_GDP) <- c(1:22)
+Pop_GDP <- Pop_GDP[,c(1,2,4,3,5,6,7)]
+
+
+PopGDPplot <- ggplot(Pop_GDP, aes(x = year, y = PopChangeRate)) + 
+  geom_line(aes(group = 1), color = "darkgreen", linewidth = 1) +
+  geom_point(aes(color = "Population"), size = 2, shape = 17) +
+  geom_line(aes(x = year, y = GDPChangeRate, group = 1), color = "darkorange", linewidth = 1) +
+  geom_point(aes(x = year, y = GDPChangeRate, color = "GDP"), size = 2, shape = 19) +
+  geom_line(aes(x = year, y = ElecPriceChangeRate, group = 1), color = "blue", linewidth = 1) +
+  geom_point(aes(x = year, y = ElecPriceChangeRate, color = "ElecPrice"), size = 2, shape = 17) +
+  scale_x_continuous() +
+  scale_y_continuous() +
+  # set axis labels and limits
+  labs(x = "Year", y = "Change Rate", color = "") +
+  
+  # add a legend
+  scale_color_manual(name = "", values = c("Population" = "darkgreen", "GDP" = "darkorange", "ElecPrice" = "blue"),
+                     labels = c("Population", "GDP", "ElecPrice"),
+                     guide = guide_legend(override.aes = list(size = 2))) +
+  
+  # customize theme
+  theme_classic()
+PopGDPplot
+```
+
+```{r}
+Elecpricepred <- glm(ElecPrice ~ log(GDP),data = Pop_GDP)
+Elecpriceplot <- ggplot(aes(y=ElecPrice,x=log(GDP)),data=Pop_GDP)+geom_point() + geom_smooth()
+
+Popplot <- ggplot(COL_Pop_Year,aes(x=year,y=totalPopulation)) + geom_point() + geom_smooth()
+Popplot
+
+
+
+pa01dstxshp_COL <- pa01dstxshp %>% filter(str_detect(STANAME, ", CO"))
+
+solarmap_sf <- st_as_sf(solarmap, coords = c("latitude","longitude"),crs = 4326)
+solarmapplot <- plot(st_geometry(solarmap_sf), pch=16, col="navy")
+plot(solarmap_sf$geometry)
+ par(mar=c(0,0,0,0))
+plot(pa01dstxshp)
+plot(pa01dstxshp_COL$geometry)
+plot(windmaprgb)
+```
+
+```{r}
+# # #k-fold
+# set.seed(1234)
+# trainrow <- nrow(solarmap) * 0.8
+# train <- sample(nrow(solarmap),size = trainrow)
+# trainsolar <- solarmap[train,]
+# testsolar <- solarmap[-train,]
+# x <- model.matrix(capacity_mw ~ ., data = trainsolar)[,-1]
+# y <- trainsolar$capacity_mw
+# lasso <- cv.glmnet(
+#   x,
+#   y,
+#   alpha = 1,
+#   nfolds = 10
+# )
+# plot(lasso)
+# lambda.min <- lasso$lambda.min
+# lasso.fit <- glmnet(x, y, alpha = 1, lambda = lambda.min)
+# x.test <- model.matrix(capacity_mw ~ ., data = testsolar)[,-1]
+# y.test <- testsolar$capacity_mw
+# lasso.pred <- predict(lasso.fit, newx = x.test)
+# 
+# # Calculate the test MSE
+# mean((y.test - lasso.pred)^2)
+# #k-fold
+set.seed(1234)
+trainrow <- nrow(spg) * 0.8
+train <- sample(nrow(spg),size = trainrow)
+trainspg <- spg[train,]
+testspg <- spg[-train,]
+x.train <- model.matrix(generated_power_kw ~ ., data = trainspg)
+y.train <- trainspg$generated_power_kw
+lasso <- cv.glmnet(
+  x=x.train,
+  y=y.train,
+  alpha = 1,
+  nfolds = 10
+)
+plot(lasso)
+lambda.min <- lasso$lambda.min
+lasso.fit <- glmnet(x.train, y.train, alpha = 1, lambda = lambda.min)
+x.test <- model.matrix(generated_power_kw ~ ., data = testspg)
+y.test <- testspg$generated_power_kw
+lasso.pred <- predict(lasso.fit, newx = x.test)
+coef(lasso.fit)
+# Calculate the test MSE
+mean((y.test - lasso.pred)^2)
+
+
+treemodel <- rpart(generated_power_kw ~ ., data = trainspg)
+rpart.plot(treemodel)
+treepredictions <- predict(treemodel, newdata = testspg)
+mse <- mean((testspg$generated_power_kw - treepredictions)^2)
+mse
+```
+
+```{r}
+neuralnet <- neuralnet(generated_power_kw ~ .,data=trainspg,hidden = 5, act.fct = "logistic")
+plot(neuralnet,radius = 0.15, arrow.length = 0.2, intercept = TRUE,
+  intercept.factor = 0.4, information = TRUE, information.pos = 0.1,
+  col.entry.synapse = "black", col.entry = "black",
+  col.hidden = "black", col.hidden.synapse = "black",
+  col.out = "black", col.out.synapse = "black",
+  col.intercept = "blue", fontsize = 12, dimension = 6)
+neuralpredictions <- predict(neuralnet, newdata = testspg)
+mse <- mean((testspg$generated_power_kw - neuralpredictions)^2)
+mse
+```
+
